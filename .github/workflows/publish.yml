@@ -6,7 +6,31 @@ on:
       - main
 
 jobs:
+  test:
+    # Same gates as .github/workflows/test.yml; publish must not push an
+    # image unless the code is green (mirrors release.yml).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate vendor catalog
+        run: python3 .github/validate_vendors.py
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: gofmt
+        run: |
+          files="$(gofmt -l .)"
+          if [ -n "$files" ]; then
+            echo "$files"
+            exit 1
+          fi
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go test -race ./...
+
   publish:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read

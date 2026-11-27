@@ -6,6 +6,7 @@ on:
       - 'routeros/v*'
       - 'asuswrt/v*'
       - 'bbox/v*'
+      - 'deco/v*'
       - 'fn/v*'
       - 'opnsense/v*'
       - 'unifi/v*'
@@ -56,6 +57,13 @@ jobs:
               arches=arm64
               ;;
             bbox/v*)
+              name=integrations-supervisor
+              binary=netpulse-integrations
+              target=./cmd/integrations-supervisor
+              ldvar=main.version
+              arches="amd64 arm64"
+              ;;
+            deco/v*)
               name=integrations-supervisor
               binary=netpulse-integrations
               target=./cmd/integrations-supervisor
