@@ -39,6 +39,9 @@ jobs:
   # previous commit for a direct push to main.
   changed:
     runs-on: ubuntu-latest
+    outputs:
+      # Expose the step output as a job output so build/publish can gate on it.
+      changed: ${{ steps.detect.outputs.changed }}
     steps:
       # Fetch enough history to diff against the base.
       - uses: actions/checkout@v7
@@ -79,8 +82,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # buildx's gha cache driver needs to write the build cache.
-      cache: write
     steps:
       - uses: actions/checkout@v7
 
@@ -115,8 +116,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      # buildx's gha cache driver needs to write the build cache.
-      cache: write
 
     steps:
       - uses: actions/checkout@v7
