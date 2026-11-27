@@ -23,8 +23,8 @@
       "mode": "local",
       "arches": ["amd64", "arm64"],
       "tagPrefix": "deco/v",
-      "binary": "netpulse-integrations",
-      "target": "cmd/integrations-supervisor",
+      "binary": "deco-pusher",
+      "target": "deco/cmd/deco-pusher",
       "description": "Read-only TP-Link Deco mesh poller that speaks the web-portal API from a LAN host and reports the mesh, its clients and the uplink"
     },
     {

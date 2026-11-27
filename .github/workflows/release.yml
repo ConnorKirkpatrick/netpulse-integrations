@@ -64,13 +64,6 @@ jobs:
               ldvar=main.version
               arches="amd64 arm64"
               ;;
-            deco/v*)
-              name=integrations-supervisor
-              binary=netpulse-integrations
-              target=./cmd/integrations-supervisor
-              ldvar=main.version
-              arches="amd64 arm64"
-              ;;
             fn/v*)
               name=fn
               binary=fn-pusher
@@ -97,14 +90,14 @@ jobs:
               binary=gfiber-pusher
               target=./gfiber/cmd/gfiber-pusher
               ldvar=main.Version
-              arches=amd64
+              arches="amd64 arm64"
               ;;
             deco/v*)
               name=deco
               binary=deco-pusher
               target=./deco/cmd/deco-pusher
               ldvar=main.Version
-              arches=amd64
+              arches="amd64 arm64"
               ;;
             *)
               echo "Unsupported tag: $TAG" >&2
