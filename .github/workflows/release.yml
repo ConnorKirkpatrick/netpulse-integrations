@@ -10,6 +10,7 @@ on:
       - 'fn/v*'
       - 'opnsense/v*'
       - 'unifi/v*'
+      - 'gfiber/v*'
 
 permissions:
   contents: write
@@ -88,6 +89,20 @@ jobs:
               name=unifi
               binary=unifi-pusher
               target=./unifi/cmd/unifi-pusher
+              ldvar=main.Version
+              arches=amd64
+              ;;
+            gfiber/v*)
+              name=gfiber
+              binary=gfiber-pusher
+              target=./gfiber/cmd/gfiber-pusher
+              ldvar=main.Version
+              arches=amd64
+              ;;
+            deco/v*)
+              name=deco
+              binary=deco-pusher
+              target=./deco/cmd/deco-pusher
               ldvar=main.Version
               arches=amd64
               ;;

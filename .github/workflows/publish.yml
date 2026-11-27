@@ -5,10 +5,14 @@ on:
   pull_request:
     branches:
       - main
-  # Push to main: build AND publish the image to the registry.
+  # Push to main: build AND publish the image (tracked by the dev tag).
+  # Release tag (opnsense/v*): build AND publish a versioned image that also
+  # updates latest (e.g. opnsense/v1.2.3 -> version 1.2.3), like release.yml.
   push:
     branches:
       - main
+    tags:
+      - 'opnsense/v*'
 
 jobs:
   test:
@@ -34,14 +38,17 @@ jobs:
       - run: go test ./...
       - run: go test -race ./...
 
-  # Decide whether this run should build/publish at all: only when the
-  # integration source changed. Base is main for an MR (pull_request) and the
-  # previous commit for a direct push to main.
+  # Decide whether this run should build/publish at all. A release tag is an
+  # explicit release, so it always builds (changed=true). For an MR (push to
+  # main) we only build when the integration source actually changed: base is
+  # main for an MR and the previous commit for a direct push to main.
   changed:
     runs-on: ubuntu-latest
     outputs:
-      # Expose the step output as a job output so build/publish can gate on it.
+      # Expose the step outputs as job outputs so build/publish can use them.
       changed: ${{ steps.detect.outputs.changed }}
+      version: ${{ steps.detect.outputs.version }}
+      tags: ${{ steps.detect.outputs.tags }}
     steps:
       # Fetch enough history to diff against the base.
       - uses: actions/checkout@v7
@@ -51,6 +58,24 @@ jobs:
         id: detect
         run: |
           set -eu
+          image="ghcr.io/connorkirkpatrick/opnsense-pusher"
+          nl=$'\n'
+          sha_tag="${image}:sha-${GITHUB_SHA}"
+
+          # A release tag (opnsense/v*) is an explicit stable release:
+          #   latest (tracks newest release) + <version> + sha.
+          # Version is derived the same way release.yml does (strip <int>/v).
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            version="${GITHUB_REF_NAME#*/v}"
+            tags="${image}:latest${nl}${image}:${version}${nl}${sha_tag}"
+            echo "::notice::Release $GITHUB_REF_NAME -> ${image}:latest, :${version}, :${GITHUB_SHA:0:7}"
+          else
+            # Builds of main are the moving target: tracked by the dev tag.
+            version=""
+            tags="${image}:dev${nl}${sha_tag}"
+            echo "::notice::Tracking main -> ${image}:dev, :${GITHUB_SHA:0:7}"
+          fi
+
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             base_ref="origin/${GITHUB_BASE_REF}"
           else
@@ -65,13 +90,21 @@ jobs:
             asuswrt/ bbox/ deco/ fn/ opnsense/ routeros/ unifi/ \
             cmd/ internal/ go.mod go.sum)"
           if [ -n "$changed" ]; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
+            changed_out="true"
             echo "::notice::Integration files changed; image will be built:"
             echo "$changed"
           else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
+            changed_out="false"
             echo "::notice::No integration files changed; image build will be skipped."
           fi
+          {
+            echo "changed=${changed_out}"
+            echo "version=${version}"
+            # Multi-line tag list (latest + sha [+ version for releases]).
+            echo "tags<<TAGS"
+            printf '%s\n' "$tags"
+            echo "TAGS"
+          } >> "$GITHUB_OUTPUT"
 
   # Validate the image on a merge request: build it (multi-arch) but never
   # push it to the registry. Publishing happens only in `publish`, which is
@@ -103,9 +136,7 @@ jobs:
           # Reuse the shared GHA cache across runs for speed.
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          tags: |
-            ghcr.io/connorkirkpatrick/opnsense-pusher:latest
-            ghcr.io/connorkirkpatrick/opnsense-pusher:sha-${{ github.sha }}
+          tags: ${{ needs.changed.outputs.tags }}
 
   # Build and publish the image to ghcr. Only runs when code lands on main
   # (push), so a merge request can validate the build without publishing.
@@ -136,11 +167,10 @@ jobs:
           context: .
           file: opnsense/Dockerfile
           build-args: |
-            VERSION=sha-${{ github.sha }}
+            # Real version for a release tag, otherwise the sha (traceable).
+            VERSION=${{ needs.changed.outputs.version || format('sha-{0}', github.sha) }}
           push: true
           platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          tags: |
-            ghcr.io/connorkirkpatrick/opnsense-pusher:latest
-            ghcr.io/connorkirkpatrick/opnsense-pusher:sha-${{ github.sha }}
+          tags: ${{ needs.changed.outputs.tags }}
