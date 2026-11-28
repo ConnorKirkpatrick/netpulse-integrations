@@ -1,12 +1,148 @@
 name: Publish
 
 on:
+  # MR to main: build the image to validate it, but do NOT publish it.
+  pull_request:
+    branches:
+      - main
+  # Push to main: build AND publish the image (tracked by the dev tag).
+  # Release tag (opnsense/v*): build AND publish a versioned image that also
+  # updates latest (e.g. opnsense/v1.2.3 -> version 1.2.3), like release.yml.
   push:
     branches:
       - main
+    tags:
+      - 'opnsense/v*'
 
 jobs:
+  test:
+    # Same gates as .github/workflows/test.yml; never build/publish an image
+    # unless the code is green (mirrors release.yml).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate vendor catalog
+        run: python3 .github/validate_vendors.py
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: gofmt
+        run: |
+          files="$(gofmt -l .)"
+          if [ -n "$files" ]; then
+            echo "$files"
+            exit 1
+          fi
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go test -race ./...
+
+  # Decide whether this run should build/publish at all. A release tag is an
+  # explicit release, so it always builds (changed=true). For an MR (push to
+  # main) we only build when the integration source actually changed: base is
+  # main for an MR and the previous commit for a direct push to main.
+  changed:
+    runs-on: ubuntu-latest
+    outputs:
+      # Expose the step outputs as job outputs so build/publish can use them.
+      changed: ${{ steps.detect.outputs.changed }}
+      version: ${{ steps.detect.outputs.version }}
+      tags: ${{ steps.detect.outputs.tags }}
+    steps:
+      # Fetch enough history to diff against the base.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Detect integration changes
+        id: detect
+        run: |
+          set -eu
+          image="ghcr.io/connorkirkpatrick/opnsense-pusher"
+          nl=$'\n'
+          sha_tag="${image}:sha-${GITHUB_SHA}"
+
+          # A release tag (opnsense/v*) is an explicit stable release:
+          #   latest (tracks newest release) + <version> + sha.
+          # Version is derived the same way release.yml does (strip <int>/v).
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            version="${GITHUB_REF_NAME#*/v}"
+            tags="${image}:latest${nl}${image}:${version}${nl}${sha_tag}"
+            echo "::notice::Release $GITHUB_REF_NAME -> ${image}:latest, :${version}, :${GITHUB_SHA:0:7}"
+          else
+            # Builds of main are the moving target: tracked by the dev tag.
+            version=""
+            tags="${image}:dev${nl}${sha_tag}"
+            echo "::notice::Tracking main -> ${image}:dev, :${GITHUB_SHA:0:7}"
+          fi
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base_ref="origin/${GITHUB_BASE_REF}"
+          else
+            # Direct push to main: compare against the previous commit.
+            base_ref="HEAD~1"
+          fi
+          base="$(git merge-base "$base_ref" HEAD 2>/dev/null || git rev-parse "$base_ref")"
+          # Integration source: the per-vendor folders, shared code, and the
+          # module files the Docker image is built from. Docs, .github and the
+          # vendor catalog are deliberately excluded.
+          changed="$(git diff --name-only "$base" HEAD -- \
+            asuswrt/ bbox/ deco/ fn/ opnsense/ routeros/ unifi/ \
+            cmd/ internal/ go.mod go.sum)"
+          if [ -n "$changed" ]; then
+            changed_out="true"
+            echo "::notice::Integration files changed; image will be built:"
+            echo "$changed"
+          else
+            changed_out="false"
+            echo "::notice::No integration files changed; image build will be skipped."
+          fi
+          {
+            echo "changed=${changed_out}"
+            echo "version=${version}"
+            # Multi-line tag list (latest + sha [+ version for releases]).
+            echo "tags<<TAGS"
+            printf '%s\n' "$tags"
+            echo "TAGS"
+          } >> "$GITHUB_OUTPUT"
+
+  # Validate the image on a merge request: build it (multi-arch) but never
+  # push it to the registry. Publishing happens only in `publish`, which is
+  # restricted to pushes onto main.
+  build:
+    needs: [test, changed]
+    if: github.event_name == 'pull_request' && needs.changed.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build opnsense-pusher (no push)
+        uses: docker/build-push-action@v7
+        with:
+          # Context is the repository root: opnsense/Dockerfile copies go.mod
+          # and the module tree, so the module root must be the context.
+          context: .
+          file: opnsense/Dockerfile
+          # Traceable version stamp (release builds embed the tag version).
+          build-args: |
+            VERSION=sha-${{ github.sha }}
+          push: false
+          platforms: linux/amd64,linux/arm64
+          # Reuse the shared GHA cache across runs for speed.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: ${{ needs.changed.outputs.tags }}
+
+  # Build and publish the image to ghcr. Only runs when code lands on main
+  # (push), so a merge request can validate the build without publishing.
   publish:
+    needs: [test, changed]
+    if: github.event_name == 'push' && needs.changed.outputs.changed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -25,21 +161,16 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build and push opnsense-pusher
+      - name: Publish opnsense-pusher
         uses: docker/build-push-action@v7
         with:
-          # Context is the repository root: opnsense/Dockerfile copies go.mod
-          # and the module tree, so the module root must be the context.
           context: .
           file: opnsense/Dockerfile
-          # Traceable version stamp (release builds embed the tag version).
           build-args: |
-            VERSION=sha-${{ github.sha }}
+            # Real version for a release tag, otherwise the sha (traceable).
+            VERSION=${{ needs.changed.outputs.version || format('sha-{0}', github.sha) }}
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: |
-            ghcr.io/connorkirkpatrick/opnsense-pusher:latest
-            ghcr.io/connorkirkpatrick/opnsense-pusher:sha-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      
+          tags: ${{ needs.changed.outputs.tags }}

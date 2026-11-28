@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -128,8 +129,12 @@ func TestCookieRotationPersists(t *testing.T) {
 			t.Fatalf("jar lost %q: %s", want, got)
 		}
 	}
-	if fi, err := os.Stat(file); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Fatalf("jar mode after rotation: %v %v", fi, err)
+	// The jar must stay owner-only. On Windows, Go reports 0666 regardless of
+	// the requested mode bits, so this assertion only applies on Unix.
+	if runtime.GOOS != "windows" {
+		if fi, err := os.Stat(file); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Fatalf("jar mode after rotation: %v %v", fi, err)
+		}
 	}
 }
 
