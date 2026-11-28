@@ -6,9 +6,11 @@ on:
       - 'routeros/v*'
       - 'asuswrt/v*'
       - 'bbox/v*'
+      - 'deco/v*'
       - 'fn/v*'
       - 'opnsense/v*'
       - 'unifi/v*'
+      - 'gfiber/v*'
 
 permissions:
   contents: write
@@ -82,6 +84,20 @@ jobs:
               target=./unifi/cmd/unifi-pusher
               ldvar=main.Version
               arches=amd64
+              ;;
+            gfiber/v*)
+              name=gfiber
+              binary=gfiber-pusher
+              target=./gfiber/cmd/gfiber-pusher
+              ldvar=main.Version
+              arches="amd64 arm64"
+              ;;
+            deco/v*)
+              name=deco
+              binary=deco-pusher
+              target=./deco/cmd/deco-pusher
+              ldvar=main.Version
+              arches="amd64 arm64"
               ;;
             *)
               echo "Unsupported tag: $TAG" >&2
