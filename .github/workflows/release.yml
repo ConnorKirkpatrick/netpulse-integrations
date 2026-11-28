@@ -8,6 +8,8 @@ on:
       - 'bbox/v*'
       - 'deco/v*'
       - 'fn/v*'
+      - 'gfiber/v*'
+      - 'keenetic/v*'
       - 'opnsense/v*'
       - 'unifi/v*'
       - 'gfiber/v*'
@@ -68,6 +70,20 @@ jobs:
               name=fn
               binary=fn-pusher
               target=./fn/cmd/fn-pusher
+              ldvar=main.Version
+              arches="amd64 arm64"
+              ;;
+            gfiber/v*)
+              name=gfiber
+              binary=gfiber-pusher
+              target=./gfiber/cmd/gfiber-pusher
+              ldvar=main.Version
+              arches="amd64 arm64"
+              ;;
+            keenetic/v*)
+              name=keenetic
+              binary=keenetic-pusher
+              target=./keenetic/cmd/keenetic-pusher
               ldvar=main.Version
               arches="amd64 arm64"
               ;;
