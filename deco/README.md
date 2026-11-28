@@ -70,16 +70,17 @@ Treat the numbers as "strong / fair / weak", not as a measurement.
 
 ## Building
 
+The standalone pusher — the binary the `deco/v*` release tags publish for
+amd64 and arm64 — is built from `deco/cmd/deco-pusher`:
+
 ```sh
-go build ./deco/...
+go build -trimpath -o deco-pusher ./deco/cmd/deco-pusher
 ```
 
-Two binaries are produced:
-
-- `deco/cmd/deco-pusher` — a standalone pusher for running outside the
-  supervisor (Docker, a systemd unit, a Raspberry Pi, …).
-- `cmd/integrations-supervisor` — the supervisor with Deco wired in as
-  `type: "deco"`. This is the binary the `deco/v*` release tags publish.
+It runs anywhere that can reach the Deco: a container, a systemd unit, a
+Raspberry Pi, or the NetPulse host. Deco is additionally wired into the
+shared supervisor as `type: "deco"`, which is built separately from
+`./cmd/integrations-supervisor` if you run pollers under it.
 
 ## Configuration (standalone pusher)
 
@@ -95,6 +96,37 @@ full set. The Deco-specific variables are:
 The shared pusher variables (`NETPULSE_SERVER`, `NETPULSE_TOKEN`,
 `NETPULSE_SLUG`, `NETPULSE_INTERVAL`, `NETPULSE_SERVER_FP` or
 `NETPULSE_CA_FILE`) are read by the common `pusher` package.
+
+## Running in Docker
+
+A multi-arch image is built from [`Dockerfile`](Dockerfile) and published to
+GitHub Container Registry as
+`ghcr.io/connorkirkpatrick/deco-pusher`. The `dev` tag tracks the latest
+build from `main`, `<version>` tags track releases, and `sha-<sha>` pins an
+exact commit. It runs the same standalone pusher as above, so the container
+needs no ports and no volumes — only network reachability to the Deco and to
+the NetPulse server.
+
+Run one container per Deco mesh, from a host on the Deco's LAN:
+
+```sh
+docker run --rm --name netpulse-deco \
+  -e DECO_HOST=deco.lan \
+  -e DECO_PASSWORD='change-me' \
+  -e NETPULSE_SERVER=https://netpulse.example.com \
+  -e NETPULSE_TOKEN='change-me' \
+  -e NETPULSE_SLUG=living-room-deco \
+  ghcr.io/connorkirkpatrick/deco-pusher:dev
+```
+
+The Deco serves a self-signed certificate, so TLS verification is skipped by
+default; set `DECO_INSECURE=0` only if you have trusted that certificate.
+To build the image locally instead of pulling it, run from the repository
+root (the module root must be the build context):
+
+```sh
+docker build -t netpulse-deco-agent:latest -f deco/Dockerfile .
+```
 
 ## Running under the supervisor
 
