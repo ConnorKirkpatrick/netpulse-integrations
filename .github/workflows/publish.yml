@@ -1,18 +1,20 @@
 name: Publish
 
 on:
-  # MR to main: build the image to validate it, but do NOT publish it.
+  # MR to main: build the image(s) to validate them, but do NOT publish.
   pull_request:
     branches:
       - main
-  # Push to main: build AND publish the image (tracked by the dev tag).
-  # Release tag (opnsense/v*): build AND publish a versioned image that also
-  # updates latest (e.g. opnsense/v1.2.3 -> version 1.2.3), like release.yml.
+  # Push to main: build AND publish (each image is tracked by its dev tag).
+  # A vendor release tag (opnsense/v*, deco/v*) builds AND publishes that
+  # vendor's versioned image, which also updates its own latest (e.g.
+  # opnsense/v1.2.3 -> opnsense-pusher:1.2.3 + :latest).
   push:
     branches:
       - main
     tags:
       - 'opnsense/v*'
+      - 'deco/v*'
 
 jobs:
   test:
@@ -38,80 +40,114 @@ jobs:
       - run: go test ./...
       - run: go test -race ./...
 
-  # Decide whether this run should build/publish at all. A release tag is an
-  # explicit release, so it always builds (changed=true). For an MR (push to
-  # main) we only build when the integration source actually changed: base is
-  # main for an MR and the previous commit for a direct push to main.
+  # Decide which image(s) this run should build. Each vendor is independent:
+  #   - A release tag (opnsense/v* or deco/v*) is an explicit release of that
+  #     vendor, so it builds that vendor's image only.
+  #   - An MR / push to main builds a vendor's image only when that vendor's
+  #     files OR the shared code the image is built from actually changed
+  #     (cmd/, internal/, go.mod, go.sum). Docs, .github and the vendor
+  #     catalog are deliberately excluded.
+  # So a branch that only touches deco/ publishes the deco image and leaves
+  # the opnsense image alone, and vice-versa.
   changed:
     runs-on: ubuntu-latest
     outputs:
-      # Expose the step outputs as job outputs so build/publish can use them.
+      # Job-level gate: true when at least one image should be built.
       changed: ${{ steps.detect.outputs.changed }}
+      # Step-level gates: build/push each image only when it is affected.
+      opnsense: ${{ steps.detect.outputs.opnsense }}
+      deco: ${{ steps.detect.outputs.deco }}
+      # Release version ("" for main builds), used to stamp the binary.
       version: ${{ steps.detect.outputs.version }}
-      tags: ${{ steps.detect.outputs.tags }}
+      # Per-image tag lists (multi-line), consumed by the build/push steps.
+      opnsense_tags: ${{ steps.detect.outputs.opnsense_tags }}
+      deco_tags: ${{ steps.detect.outputs.deco_tags }}
     steps:
       # Fetch enough history to diff against the base.
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Detect integration changes
+      - name: Detect which images to build
         id: detect
         run: |
           set -eu
-          image="ghcr.io/connorkirkpatrick/opnsense-pusher"
           nl=$'\n'
-          sha_tag="${image}:sha-${GITHUB_SHA}"
+          opnsense_img="ghcr.io/connorkirkpatrick/opnsense-pusher"
+          deco_img="ghcr.io/connorkirkpatrick/deco-pusher"
 
-          # A release tag (opnsense/v*) is an explicit stable release:
-          #   latest (tracks newest release) + <version> + sha.
-          # Version is derived the same way release.yml does (strip <int>/v).
+          # Release tags carry a version (strip the "<vendor>/v" prefix), the
+          # same way release.yml derives it. Main builds have no version.
+          version=""
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
             version="${GITHUB_REF_NAME#*/v}"
-            tags="${image}:latest${nl}${image}:${version}${nl}${sha_tag}"
-            echo "::notice::Release $GITHUB_REF_NAME -> ${image}:latest, :${version}, :${GITHUB_SHA:0:7}"
-          else
-            # Builds of main are the moving target: tracked by the dev tag.
-            version=""
-            tags="${image}:dev${nl}${sha_tag}"
-            echo "::notice::Tracking main -> ${image}:dev, :${GITHUB_SHA:0:7}"
           fi
 
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            base_ref="origin/${GITHUB_BASE_REF}"
+          # A vendor's image tags: a release updates its latest + <version> +
+          # a traceable sha; main builds are the moving target (dev + sha).
+          if [ -n "$version" ]; then
+            opnsense_tags="${opnsense_img}:latest${nl}${opnsense_img}:${version}${nl}${opnsense_img}:sha-${GITHUB_SHA}"
+            deco_tags="${deco_img}:latest${nl}${deco_img}:${version}${nl}${deco_img}:sha-${GITHUB_SHA}"
           else
-            # Direct push to main: compare against the previous commit.
-            base_ref="HEAD~1"
+            opnsense_tags="${opnsense_img}:dev${nl}${opnsense_img}:sha-${GITHUB_SHA}"
+            deco_tags="${deco_img}:dev${nl}${deco_img}:sha-${GITHUB_SHA}"
           fi
-          base="$(git merge-base "$base_ref" HEAD 2>/dev/null || git rev-parse "$base_ref")"
-          # Integration source: the per-vendor folders, shared code, and the
-          # module files the Docker image is built from. Docs, .github and the
-          # vendor catalog are deliberately excluded.
-          changed="$(git diff --name-only "$base" HEAD -- \
-            asuswrt/ bbox/ deco/ fn/ opnsense/ routeros/ unifi/ \
-            cmd/ internal/ go.mod go.sum)"
-          if [ -n "$changed" ]; then
+
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            # An explicit release: build exactly the vendor the tag names.
+            case "${GITHUB_REF_NAME}" in
+              opnsense/v*) opnsense_out="true"; deco_out="false" ;;
+              deco/v*)     opnsense_out="false"; deco_out="true" ;;
+              *) echo "Unsupported release tag: $GITHUB_REF_NAME" >&2; exit 1 ;;
+            esac
+          else
+            # MR / push to main: rebuild each image only when its own files or
+            # the shared code it is built from changed.
+            base_ref="origin/${GITHUB_BASE_REF}"
+            if [ "${{ github.event_name }}" != "pull_request" ]; then
+              # Direct push to main: compare against the previous commit.
+              base_ref="HEAD~1"
+            fi
+            base="$(git merge-base "$base_ref" HEAD 2>/dev/null || git rev-parse "$base_ref")"
+            # Shared code both images compile from.
+            shared="$(git diff --name-only "$base" HEAD -- cmd/ internal/ go.mod go.sum)"
+            opnsense_out="false"; deco_out="false"
+            if [ -n "$(git diff --name-only "$base" HEAD -- opnsense/)" ] || [ -n "$shared" ]; then
+              opnsense_out="true"
+            fi
+            if [ -n "$(git diff --name-only "$base" HEAD -- deco/)" ] || [ -n "$shared" ]; then
+              deco_out="true"
+            fi
+          fi
+
+          if [ "$opnsense_out" = "true" ] || [ "$deco_out" = "true" ]; then
             changed_out="true"
-            echo "::notice::Integration files changed; image will be built:"
-            echo "$changed"
           else
             changed_out="false"
-            echo "::notice::No integration files changed; image build will be skipped."
           fi
+          echo "::notice::Build opnsense image: ${opnsense_out}; deco image: ${deco_out} (changed=${changed_out})"
+
           {
             echo "changed=${changed_out}"
+            echo "opnsense=${opnsense_out}"
+            echo "deco=${deco_out}"
             echo "version=${version}"
-            # Multi-line tag list (latest + sha [+ version for releases]).
-            echo "tags<<TAGS"
-            printf '%s\n' "$tags"
+            # Multi-line tag lists (one tag per line).
+            echo "opnsense_tags<<TAGS"
+            printf '%s\n' "$opnsense_tags"
+            echo "TAGS"
+            echo "deco_tags<<TAGS"
+            printf '%s\n' "$deco_tags"
             echo "TAGS"
           } >> "$GITHUB_OUTPUT"
 
-  # Validate the image on a merge request: build it (multi-arch) but never
-  # push it to the registry. Publishing happens only in `publish`, which is
-  # restricted to pushes onto main.
+  # Validate the image(s) on a merge request: build each affected image
+  # (multi-arch) but never push it to the registry. Publishing happens only
+  # in `publish`, which is restricted to pushes onto main / release tags.
   build:
     needs: [test, changed]
-    if: github.event_name == 'pull_request' && needs.changed.outputs.changed == 'true'
+    if: >-
+      github.event_name == 'pull_request' &&
+      (needs.changed.outputs.opnsense == 'true' || needs.changed.outputs.deco == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -122,27 +158,45 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Build opnsense-pusher (no push)
+        if: needs.changed.outputs.opnsense == 'true'
         uses: docker/build-push-action@v7
         with:
           # Context is the repository root: opnsense/Dockerfile copies go.mod
           # and the module tree, so the module root must be the context.
           context: .
           file: opnsense/Dockerfile
-          # Traceable version stamp (release builds embed the tag version).
           build-args: |
+            # Main builds stamp a traceable sha (no release version).
             VERSION=sha-${{ github.sha }}
           push: false
           platforms: linux/amd64,linux/arm64
           # Reuse the shared GHA cache across runs for speed.
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          tags: ${{ needs.changed.outputs.tags }}
+          tags: ${{ needs.changed.outputs.opnsense_tags }}
 
-  # Build and publish the image to ghcr. Only runs when code lands on main
-  # (push), so a merge request can validate the build without publishing.
+      - name: Build deco-pusher (no push)
+        if: needs.changed.outputs.deco == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deco/Dockerfile
+          build-args: |
+            VERSION=sha-${{ github.sha }}
+          push: false
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: ${{ needs.changed.outputs.deco_tags }}
+
+  # Build and publish each affected image to ghcr. Only runs when code lands
+  # on main (push) or a vendor release tag is pushed, so a merge request can
+  # validate the build without publishing.
   publish:
     needs: [test, changed]
-    if: github.event_name == 'push' && needs.changed.outputs.changed == 'true'
+    if: >-
+      github.event_name == 'push' &&
+      (needs.changed.outputs.opnsense == 'true' || needs.changed.outputs.deco == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -162,6 +216,7 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Publish opnsense-pusher
+        if: needs.changed.outputs.opnsense == 'true'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -173,4 +228,18 @@ jobs:
           platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          tags: ${{ needs.changed.outputs.tags }}
+          tags: ${{ needs.changed.outputs.opnsense_tags }}
+
+      - name: Publish deco-pusher
+        if: needs.changed.outputs.deco == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deco/Dockerfile
+          build-args: |
+            VERSION=${{ needs.changed.outputs.version || format('sha-{0}', github.sha) }}
+          push: true
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: ${{ needs.changed.outputs.deco_tags }}
